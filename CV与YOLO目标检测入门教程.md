@@ -13,11 +13,11 @@
 2. [OpenCV 基础处理（CV 入门）](#第二部分opencv-基础处理cv-入门)
 3. [YOLO 目标检测](#第三部分yolo-目标检测)
    - [YOLO 是什么](#31-yolo-是什么)
-   - [数据集准备（预留 GitHub 仓库位置）](#32-数据集准备预留-github-仓库位置)
+   - [数据集准备](#32-数据集准备)
    - [训练模型](#33-训练模型)
    - [部署与推理](#34-部署与推理)
    - [TensorRT 加速（进阶，可选）](#35-tensorrt-加速进阶可选)
-4. [GitHub 数据集仓库位置（预留）](#第四部分github-数据集仓库位置预留)
+4. [GitHub 数据集仓库位置](#第四部分github-数据集仓库位置)
 5. [常见问题（FAQ）](#第五部分常见问题faq)
 
 ---
@@ -383,7 +383,7 @@ cv2.destroyAllWindows()
 
 > 本教程以 **YOLOv8** 为例（`ultralytics` 库），这也是目前最流行、对新手最友好的版本。
 
-## 3.2 数据集准备（预留 GitHub 仓库位置）
+## 3.2 数据集准备
 
 训练一个 YOLO 模型需要「喂」给它**标注好的图片**。整体流程：
 
@@ -560,24 +560,24 @@ model.export(format="engine")
 
 ---
 
-# 第四部分：GitHub 数据集仓库位置（预留）
+# 第四部分：GitHub 数据集仓库位置
 
-> 这里预留一个位置，用于存放**数据集实例**的 GitHub 仓库。后续将仓库创建好并上传示例数据集后，把链接和说明填在下面即可。
+> 本教程配套的**数据集实例**已放在下面的 GitHub 仓库中，可直接克隆使用。
 
 ## 数据集仓库地址
 
-- **仓库链接**：`https://github.com/gracilaria/【此处替换为你的仓库名】`
-- **克隆命令**（把上面的链接替换后使用）：
+- **仓库链接**：`https://github.com/gracilaria-none/vision-learning`
+- **克隆命令**：
 
 ```bash
 # 克隆数据集仓库到本地
-git clone https://github.com/gracilaria/【此处替换为你的仓库名】.git
+git clone https://github.com/gracilaria-none/vision-learning.git
 ```
 
 ## 仓库目录说明（规划）
 
 ```
-your-dataset-repo/
+vision-learning/
 ├── README.md              # 数据集说明（类别、数量、来源）
 ├── dataset/               # 数据集本体
 │   ├── train/
