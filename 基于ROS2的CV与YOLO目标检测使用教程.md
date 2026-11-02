@@ -1,0 +1,851 @@
+# 基于 ROS2 的 CV 与 YOLO 目标检测使用教程
+
+> **作者**：gracilaria
+>
+> **说明**：本文档带你从「搭建 ROS2 环境」到「跑通 OpenCV 图像处理」，再到「在 ROS2 节点里调用 YOLO 模型做目标检测（只推理，不训练）」，最后接入**海康工业相机节点**完成端到端检测。文中所有代码都带有详细注释，且**每个程序都对应一个独立的 `.py` 文件**。
+>
+> **参考仓库**：https://github.com/gracilaria-none/robocon26-sues.git
+> （分支：`data` = 配置文件、`hikvision-camera` = 海康相机驱动、`weapon-yolo` = YOLO 检测包 + 权重）
+
+---
+
+## 目录
+
+1. [环境配置](#第一部分环境配置)
+2. [OpenCV 基础处理（CV 入门）](#第二部分opencv-基础处理cv-入门)
+   - [2.1 读取并显示一张图片](#21-读取并显示一张图片)
+   - [2.2 打开摄像头并实时显示画面](#22-打开摄像头并实时显示画面)
+   - [2.3 常用图像处理操作](#23-常用图像处理操作)
+   - [2.4 颜色空间转换与颜色目标检测](#24-颜色空间转换与颜色目标检测)
+   - [2.5 ROS2 图像消息与 cv_bridge 转换](#25-ros2-图像消息与-cv_bridge-转换)
+3. [YOLO 目标检测（只推理，不训练）](#第三部分yolo-目标检测只推理不训练)
+   - [3.1 YOLO 是什么](#31-yolo-是什么)
+   - [3.2 获取模型权重](#32-获取模型权重)
+   - [3.3 单张图片 YOLO 推理](#33-单张图片-yolo-推理)
+   - [3.4 ROS2 通用 YOLO 节点](#34-ros2-通用-yolo-节点)
+   - [3.5 接入海康相机的 YOLO 节点](#35-接入海康相机的-yolo-节点)
+4. [海康相机 ROS2 节点](#第四部分海康相机-ros2-节点)
+5. [GitHub 仓库位置](#第五部分github-仓库位置)
+6. [常见问题（FAQ）](#第六部分常见问题faq)
+
+---
+
+# 第一部分：环境配置
+
+> 本教程全部在 **Ubuntu 22.04 + ROS2 Humble** 下进行。Ubuntu 22.04 对应 ROS2 Humble 发行版（官方长期支持版本）。下面步骤都在终端（快捷键 `Ctrl+Alt+T`）中执行。
+
+## 1.1 设置编码（locale）为 UTF-8
+
+```bash
+# 确保系统区域设置为 UTF-8，ROS2 对此有要求
+sudo apt update && sudo apt install locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+```
+
+## 1.2 启用 Ubuntu Universe 软件源
+
+```bash
+# universe 源包含 ROS2 依赖的部分软件包
+sudo apt install software-properties-common
+sudo add-apt-repository universe
+```
+
+## 1.3 添加 ROS2 仓库的密钥与地址（使用清华镜像源）
+
+> 国内访问 ROS2 官方源（`packages.ros.org`）速度很慢，这里改用**清华大学开源软件镜像站**（Tuna）提供的 ROS2 镜像源，内容与官方完全一致，只是下载服务器不同。
+
+```bash
+# 先安装 curl（下载工具）和 lsb-release（用于获取系统版本代号）
+sudo apt update && sudo apt install curl lsb-release -y
+
+# 下载 ROS2 官方 GPG 密钥（用于验证软件包来源可信）
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+  -o /usr/share/keyrings/ros-archive-keyring.gpg
+
+# 把 ROS2 软件源地址写入系统源列表（清华镜像源）
+# $(lsb_release -cs) 会自动替换成当前系统代号（Ubuntu 22.04 对应 jammy）
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu $(lsb_release -cs) main" \
+  | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+```
+
+## 1.4 更新并安装 ROS2 Humble
+
+```bash
+# 更新软件包索引
+sudo apt update
+
+# 安装桌面完整版（含 RViz、demo 等图形工具，推荐）
+sudo apt install ros-humble-desktop -y
+```
+
+> 如果只想装精简版，可用 `ros-humble-ros-base`。教程推荐 `desktop` 版，方便用 RViz 可视化调试图像话题。
+
+## 1.5 让 ROS2 环境变量自动生效
+
+```bash
+# 每次打开新终端都要 source 一次，才能使用 ros2 命令
+source /opt/ros/humble/setup.bash
+
+# 为避免每次手动 source，把它写进 ~/.bashrc（每次打开终端自动加载）
+echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+source ~/.bashrc
+```
+
+## 1.6 验证 ROS2 安装
+
+```bash
+# 打开两个终端窗口
+# 终端 A：启动一个「发布者」，每秒广播一句 hello world
+ros2 run demo_nodes_cpp talker
+
+# 终端 B：启动一个「订阅者」，接收上面的消息
+ros2 run demo_nodes_py listener
+
+# 若 B 终端能持续打印 "Hello World"，说明 ROS2 安装成功
+```
+
+## 1.7 安装视觉相关的依赖包
+
+```bash
+# cv_bridge：ROS2 与 OpenCV 之间的「桥梁」，负责在 ROS 图像消息和 OpenCV 图像之间互相转换
+sudo apt install ros-humble-cv-bridge -y
+
+# 安装 OpenCV 的 Python 绑定（Ubuntu 下用 pip3，推荐装在系统里或虚拟环境中）
+pip3 install opencv-python
+
+# 安装 Ultralytics：用于加载 YOLO 模型做推理（本教程不需要训练）
+pip3 install ultralytics
+
+# colcon 构建工具（编译工作空间用）
+sudo apt install python3-colcon-common-extensions -y
+```
+
+> **国内加速小技巧**：如果 pip 下载很慢，可以在每个 pip 命令后加上清华镜像源：
+> `pip3 install ultralytics -i https://pypi.tuna.tsinghua.edu.cn/simple`
+
+## 1.8 创建并编译 ROS2 工作空间
+
+```bash
+# 创建工作空间目录（名字可自定义，这里叫 ros2_ws）
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws
+
+# 编译工作空间（colcon 是 ROS2 的构建工具；之后每加一个包都要重新编译）
+colcon build
+
+# 让工作空间里的包生效
+source install/setup.bash
+```
+
+> **小结**：在 ROS2 里做视觉，基本套路是「**摄像头/图像 → `cv_bridge` → OpenCV 处理 → `cv_bridge` → ROS 消息发布**」。下面第二部分先熟悉 OpenCV，第三部分再把 YOLO 模型接进 ROS2 节点。
+
+---
+
+# 第二部分：OpenCV 基础处理（CV 入门）
+
+> OpenCV（Open Source Computer Vision Library）是最常用的开源计算机视觉库。先用几个小程序熟悉它（这些程序与 Windows 版一致，直接 `python3 文件名.py` 运行即可）。
+
+## 2.1 读取并显示一张图片
+
+> 对应程序：`ros2_2_1_read_show_image.py`
+
+```python
+import cv2  # 导入 OpenCV 库，习惯上简写为 cv2
+
+# 读取图片（把路径换成你自己电脑上的图片路径，Ubuntu 下例如 "/home/用户名/Pictures/test.jpg"）
+# 返回的 img 是一个 NumPy 数组，形状是 (高, 宽, 通道数)
+img = cv2.imread("test.jpg")
+
+# 检查图片是否读取成功（路径错误时会返回 None）
+if img is None:
+    print("读取图片失败，请检查路径！")
+else:
+    # 打开一个窗口显示图片
+    cv2.imshow("图片窗口", img)
+
+    # waitKey(0) 表示等待用户按任意键才继续；参数是等待的毫秒数，0 表示无限等待
+    cv2.waitKey(0)
+
+    # 关闭所有 OpenCV 创建的窗口，释放资源
+    cv2.destroyAllWindows()
+```
+
+## 2.2 打开摄像头并实时显示画面
+
+> 对应程序：`ros2_2_2_camera_display.py`
+
+```python
+import cv2
+
+# 打开默认摄像头（参数 0 表示第一个摄像头；外接摄像头可试 1、2...）
+# 注意：海康工业相机不通过 VideoCapture 打开，而是走 ROS2 节点（见教程第四部分）
+cap = cv2.VideoCapture(0)
+
+# 循环读取每一帧画面
+while True:
+    # cap.read() 返回两个值：
+    #   ret  : 布尔值，True 表示成功读到一帧，False 表示失败（如摄像头断开）
+    #   frame: 这一帧的图像数据
+    ret, frame = cap.read()
+
+    # 如果读帧失败，跳出循环
+    if not ret:
+        print("无法读取摄像头画面")
+        break
+
+    # 显示画面
+    cv2.imshow("摄像头实时画面", frame)
+
+    # 每 1 毫秒检测一次按键；按 q 键（ASCII 码 113）退出循环
+    # 注意：这里不能用 waitKey(0)，否则画面会卡住不动
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+# 释放摄像头（养成好习惯，否则可能占用设备）
+cap.release()
+cv2.destroyAllWindows()
+```
+
+## 2.3 常用图像处理操作
+
+> 对应程序：`ros2_2_3_image_processing.py`
+
+```python
+import cv2
+
+img = cv2.imread("test.jpg")
+if img is None:
+    raise FileNotFoundError("找不到图片，请检查路径")
+
+# 1. 调整尺寸：缩放到 640x480
+#    cv2.resize(原图, (宽, 高))
+img_resized = cv2.resize(img, (640, 480))
+
+# 2. 灰度化：彩色图转灰度图（很多算法只需要灰度图，且更快）
+#    注意 OpenCV 默认是 BGR 通道顺序，不是常见的 RGB
+gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+# 3. 高斯模糊：降噪，让画面更平滑
+#    (5, 5) 是卷积核大小（必须是奇数），越大越模糊
+blurred = cv2.GaussianBlur(img, (5, 5), 0)
+
+# 4. 边缘检测：Canny 算法，突出物体轮廓
+#    100 和 200 是两个阈值，值越低检测到的边缘越多
+edges = cv2.Canny(gray, 100, 200)
+
+# 5. 二值化：把灰度图变成只有黑白两色
+#    127 是阈值：像素值 > 127 变白(255)，否则变黑(0)
+_, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+
+# 6. 画一个矩形框在图上（目标检测结果常用）
+#    (50, 50) 是左上角坐标，(200, 200) 是右下角坐标
+#    (0, 255, 0) 是颜色（BGR 顺序，这里是绿色），2 是线宽
+cv2.rectangle(img, (50, 50), (200, 200), (0, 255, 0), 2)
+
+# 7. 写一行文字在图上
+#    (10, 30) 是文字左下角起点，0.8 是字号，FONT_HERSHEY_SIMPLEX 是字体
+cv2.putText(img, "Hello CV", (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+
+# 分别显示处理结果
+cv2.imshow("原图", img)
+cv2.imshow("缩放", img_resized)
+cv2.imshow("灰度", gray)
+cv2.imshow("模糊", blurred)
+cv2.imshow("边缘", edges)
+cv2.imshow("二值化", binary)
+
+cv2.waitKey(0)
+cv2.destroyAllWindows()
+```
+
+## 2.4 颜色空间转换与颜色目标检测（进阶示例）
+
+> 对应程序：`ros2_2_4_color_detection.py`
+
+```python
+import cv2
+import numpy as np  # NumPy 用于数组运算，OpenCV 图像本质就是数组
+
+cap = cv2.VideoCapture(0)
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # OpenCV 默认读进来是 BGR 颜色空间，先转成 HSV（色相-饱和度-明度）
+    # HSV 更适合做颜色筛选，因为「颜色」由色相 H 决定，不受光照影响那么明显
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # 定义「红色」在 HSV 空间中的范围（红色在 HSV 里跨越 0 度附近，需两段）
+    # 低阈值：(色相, 饱和度, 明度)
+    lower_red1 = np.array([0, 120, 70])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([170, 120, 70])
+    upper_red2 = np.array([180, 255, 255])
+
+    # inRange 会把范围内像素设为白色(255)，范围外设为黑色(0)，得到「掩膜 mask」
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask = cv2.bitwise_or(mask1, mask2)  # 合并两段红色范围
+
+    # 用掩膜把原图中的红色部分「抠」出来
+    result = cv2.bitwise_and(frame, frame, mask=mask)
+
+    cv2.imshow("原图", frame)
+    cv2.imshow("红色掩膜", mask)
+    cv2.imshow("只保留红色", result)
+
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+```
+
+## 2.5 ROS2 图像消息与 cv_bridge 转换
+
+> 对应程序：`ros2_2_5_cv_bridge_convert.py`
+
+在 ROS2 里，图像是以 `sensor_msgs/Image` 消息的形式在节点之间传递的；而 OpenCV 处理图像用的是 NumPy 数组。**cv_bridge** 就是两者之间的「翻译官」。这是 ROS2 视觉的**核心桥梁**，第三部分会大量用到。
+
+```python
+#!/usr/bin/env python3
+import cv2
+from cv_bridge import CvBridge
+
+# 创建 CvBridge 对象（一个进程里创建一个即可，可在多个回调里复用）
+bridge = CvBridge()
+
+# 用 OpenCV 读入一张图片（OpenCV 默认是 BGR 通道顺序）
+img = cv2.imread("test.jpg")
+if img is None:
+    raise FileNotFoundError("找不到图片，请检查路径")
+
+# ---------- 方向 1：OpenCV 图像 -> ROS2 Image 消息 ----------
+# encoding 参数必须和图片的实际通道顺序一致：
+#   bgr8  = BGR 顺序的 8 位 3 通道彩色图（OpenCV 读进来默认就是这个）
+#   mono8 = 8 位单通道灰度图
+ros_msg = bridge.cv2_to_imgmsg(img, encoding="bgr8")
+print("已转成 ROS2 消息，尺寸:", ros_msg.width, "x", ros_msg.height, "编码:", ros_msg.encoding)
+
+# ---------- 方向 2：ROS2 Image 消息 -> OpenCV 图像 ----------
+# desired_encoding 表示希望转成什么格式，cv_bridge 会自动帮你做颜色空间转换
+img_back = bridge.imgmsg_to_cv2(ros_msg, desired_encoding="bgr8")
+
+# 验证转换结果与原始图片一致
+print("转换回来后的形状:", img_back.shape)  # 期望 (高, 宽, 3)
+```
+
+> 掌握以上内容，你就已经会用 OpenCV 做基础的图像读取、显示、处理和颜色识别，也理解了 ROS2 里图像消息的转换方式。接下来进入目标检测的重头戏 —— YOLO（本教程**只推理，不训练**）。
+
+---
+
+# 第三部分：YOLO 目标检测（只推理，不训练）
+
+## 3.1 YOLO 是什么
+
+**YOLO（You Only Look Once）** 是一个**单阶段目标检测模型**：输入一张图像，它「只看一眼」就直接输出检测框的坐标、类别和置信度。
+
+```
+摄像头图像 → YOLO 模型 → [(x, y, w, h, class, confidence), ...]
+```
+
+它的优点是**速度快**，非常适合实时场景（比如机器人比赛、监控、自动驾驶）。
+
+> 本教程以 **YOLOv8** 为例（`ultralytics` 库）。**注意**：本教程只需要**加载已经训练好的模型权重做推理**，不涉及数据集准备和训练（训练部分见另一个教程《CV与YOLO目标检测入门教程》）。
+
+## 3.2 获取模型权重
+
+YOLO 推理需要一个已经训练好的权重文件（`.pt`）。参考仓库已经把训练好的模型放在 `weapon-yolo` 分支的 `weights/best.pt`：
+
+```bash
+# 克隆参考仓库（含权重，约几 MB）
+git clone https://github.com/gracilaria-none/robocon26-sues.git
+cd robocon26-sues
+
+# 查看分支（data / hikvision-camera / weapon-yolo）
+git branch -a
+
+# 切到 weapon-yolo 分支，权重在 weights/best.pt
+git checkout weapon-yolo
+```
+
+> 如果你已经有自己训练好的模型（`best.pt`），直接用你自己的即可，代码用法完全一样，只需把 `model_path` 指向你的文件。
+
+## 3.3 单张图片 YOLO 推理
+
+> 对应程序：`ros2_3_1_yolo_image_inference.py`
+
+先用一个最简单的脚本验证「能加载模型、能出检测结果」，再把它搬进 ROS2 节点。
+
+```python
+#!/usr/bin/env python3
+import cv2
+from ultralytics import YOLO
+
+# 1. 加载已经训练好的模型权重（.pt 文件），这里不需要训练，直接调用即可
+model = YOLO("weights/best.pt")
+
+# 2. 读取一张待检测的图片
+img = cv2.imread("test.jpg")
+if img is None:
+    raise FileNotFoundError("找不到图片，请检查路径")
+
+# 3. 推理：conf 是置信度阈值（只保留置信度 >= conf 的框）
+results = model(img, conf=0.5)
+
+# 4. 画框并显示（results[0].plot() 会把框、类别名、置信度直接画到图上）
+annotated = results[0].plot()
+cv2.imshow("YOLO 检测结果", annotated)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
+
+# 5. 打印每个目标的详细信息（供后续 ROS2 节点里解析用）
+for r in results:
+    for box in r.boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()   # 框的左上角和右下角坐标
+        cls = int(box.cls[0])                    # 类别编号
+        conf = float(box.conf[0])                # 置信度
+        name = model.names[cls]                  # 类别名称
+        print(f"{name}: ({x1:.0f},{y1:.0f})-({x2:.0f},{y2:.0f}) conf={conf:.2f}")
+```
+
+> **核心概念解释**：
+> - **置信度（confidence）**：模型认为「这个框里确实有目标」的把握有多大，0~1 之间。`conf=0.5` 表示低于 50% 置信度的结果被丢弃。
+> - **类别（class）**：检测到的目标属于哪一类，`model.names[cls]` 是类别名。
+> - **xyxy**：框的左上角坐标 `(x1, y1)` 和右下角坐标 `(x2, y2)`。
+
+## 3.4 ROS2 通用 YOLO 节点
+
+> 对应程序：`ros2_3_2_yolo_node.py`（参考仓库 `weapon-yolo` 分支 `yolo_detector/yolo_node.py`）
+
+下面把上面的推理逻辑搬进一个 **ROS2 节点**：订阅普通相机（如 USB 摄像头）的图像话题，推理后发布画好框的图像。这是把 YOLO 接进 ROS2 的**最小完整示例**。
+
+```python
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
+import time
+from ultralytics import YOLO
+
+
+class YoloNode(Node):
+    def __init__(self):
+        super().__init__('yolo_node')  # 节点名称
+
+        # 1. 声明模型路径参数 model_path，通过命令行传入（见下方运行命令）
+        self.declare_parameter('model_path', '')
+        model_path = self.get_parameter('model_path').get_parameter_value().string_value
+        if not model_path:
+            self.get_logger().error('未提供模型路径！请通过 -p model_path:=/path/to/best.pt 传入')
+            raise RuntimeError('缺少必需的 model_path 参数')
+
+        # 2. 加载 YOLO 模型（只推理，不训练）
+        self.get_logger().info(f'正在加载 YOLO 模型: {model_path}')
+        self.model = YOLO(model_path)
+
+        # 3. CvBridge 用于 ROS2 图像消息与 OpenCV 图像互转
+        self.bridge = CvBridge()
+        self.prev_time = time.time()
+
+        # 4. 订阅图像话题（普通 USB 相机一般发在 /camera/image_raw）
+        self.image_sub = self.create_subscription(Image, '/camera/image_raw', self.image_callback, 10)
+
+        # 5. 发布画好框的图像话题
+        self.image_pub = self.create_publisher(Image, '/yolo/image_annotated', 10)
+        self.get_logger().info('YOLO ROS2 节点已启动，等待图像数据...')
+
+    def image_callback(self, msg):
+        # 1. ROS2 Image -> OpenCV
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+
+        # 2. YOLO 推理（verbose=False 关闭控制台刷屏）
+        results = self.model(frame, verbose=False)
+        annotated = results[0].plot() if len(results) > 0 else frame.copy()
+
+        # 3. 计算并绘制 FPS
+        current_time = time.time()
+        fps = 1.0 / (current_time - self.prev_time)
+        self.prev_time = current_time
+        cv2.putText(annotated, f'FPS: {int(fps)}', (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        # 4. OpenCV -> ROS2 Image 并发布
+        annotated_msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+        annotated_msg.header = msg.header
+        self.image_pub.publish(annotated_msg)
+
+        # 5. 本地预览窗口
+        cv2.imshow('YOLO ROS2 Monitor', annotated)
+        cv2.waitKey(1)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = YoloNode()
+    rclpy.spin(node)
+    cv2.destroyAllWindows()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+```
+
+**运行方式**（把节点做成 ROS2 包后）：
+
+```bash
+# 传入模型权重路径参数启动节点
+ros2 run yolo_detector yolo_node --ros-args -p model_path:=/home/用户名/ros2_ws/src/yolo_detector/weights/best.pt
+```
+
+> **通用节点 vs 海康节点**：这个通用节点订阅的是普通相机的 `/camera/image_raw` 话题。而海康工业相机不是普通 USB 摄像头，它由专门的驱动节点发布图像，话题名是 `/raw/image`——这正是下一小节和第四部分要讲的内容。
+
+## 3.5 接入海康相机的 YOLO 节点
+
+> 对应程序：`ros2_3_3_yolo_hik_cam_node.py`（参考仓库 `weapon-yolo` 分支 `yolo_detector/yolo_hik_cam_node.py`）
+
+海康工业相机由驱动节点 `hikvision_ros2_driver_node`（第四部分详述）采集，并发布图像到 **`/raw/image`** 话题。本节点订阅该话题做 YOLO 推理，除了发布画好框的图像，还额外发布一个**检测结果矩阵**（每个目标一行 `[类别, 相对中心 dx, 相对中心 dy]`），方便下游控制节点直接使用。
+
+```python
+#!/usr/bin/env python3
+import os
+import json
+import time
+
+import cv2
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from std_msgs.msg import Float32MultiArray, MultiArrayDimension
+from cv_bridge import CvBridge
+from ultralytics import YOLO
+
+
+class YoloHikCamNode(Node):
+    def __init__(self):
+        super().__init__('yolo_hik_detection_node')  # 节点名称
+
+        # 1. 读取配置文件（默认放在运行目录下），内含模型路径与相机话题
+        config_path = 'yolo_hik_cam_node.json'
+        # 默认值：与参考仓库保持一致（海康相机节点发布在 /raw/image）
+        model_path = 'weights/best.pt'
+        camera_topic = '/raw/image'
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            model_path = config.get('model_path', model_path)
+            camera_topic = config.get('camera_topic', camera_topic)
+            self.get_logger().info(f'已从 {config_path} 加载参数')
+        else:
+            self.get_logger().warn(f'配置文件 {config_path} 不存在，使用默认值')
+
+        # 2. 加载 YOLO 模型（只推理，不训练）
+        self.get_logger().info(f'正在加载 YOLO 模型: {model_path}')
+        self.model = YOLO(model_path)
+
+        # 3. CvBridge 与发布者
+        self.bridge = CvBridge()
+        # 发布带框图像，供 Rviz2 调试查看
+        self.image_pub = self.create_publisher(Image, 'yolo_detection/image_annotated', 10)
+        # 发布检测结果矩阵（n 行 3 列：cls, dx, dy）
+        self.matrix_pub = self.create_publisher(Float32MultiArray, 'yolo_detection/results_matrix', 10)
+
+        # 4. 订阅海康相机节点发布的图像话题
+        self.get_logger().info(f'正在订阅海康相机话题: {camera_topic}')
+        self.image_sub = self.create_subscription(Image, camera_topic, self.image_callback, 10)
+
+        self.prev_time = time.time()
+        self.get_logger().info('海康相机 YOLO 检测节点已启动！')
+
+    def image_callback(self, msg):
+        # 1. ROS2 Image -> OpenCV
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+
+        # 2. 图像中心（作为参考点，用于计算目标相对画面的偏移量 dx, dy）
+        img_height, img_width = frame.shape[:2]
+        cam_cx, cam_cy = img_width // 2, img_height // 2
+
+        # 3. YOLO 推理
+        results = self.model(frame)
+        annotated = frame.copy()
+
+        flat_matrix_data = []  # 展平结果: [cls1, dx1, dy1, cls2, dx2, dy2, ...]
+        target_count = 0
+
+        for r in results:
+            annotated = r.plot()
+            for box in r.boxes:
+                # 边界框中心
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                box_cx, box_cy = (x1 + x2) // 2, (y1 + y2) // 2
+                # 类别 ID 与相对偏移
+                cls_id = float(box.cls[0])
+                dx = float(box_cx - cam_cx)
+                dy = float(box_cy - cam_cy)
+                flat_matrix_data.extend([cls_id, dx, dy])
+                target_count += 1
+
+                # 调试画点画线：红点=画面中心，蓝点=目标中心
+                cv2.circle(annotated, (cam_cx, cam_cy), 5, (0, 0, 255), -1)
+                cv2.circle(annotated, (box_cx, box_cy), 5, (255, 0, 0), -1)
+                cv2.line(annotated, (cam_cx, cam_cy), (box_cx, box_cy), (255, 255, 0), 2)
+
+        # 4. 封装成 Float32MultiArray（n 行 x 3 列）
+        mat_msg = Float32MultiArray()
+        dim_rows = MultiArrayDimension()
+        dim_rows.label = 'rows_objects'
+        dim_rows.size = target_count
+        dim_rows.stride = target_count * 3
+        dim_cols = MultiArrayDimension()
+        dim_cols.label = 'columns_features'
+        dim_cols.size = 3
+        dim_cols.stride = 3
+        mat_msg.layout.dim = [dim_rows, dim_cols]
+        mat_msg.data = flat_matrix_data
+        self.matrix_pub.publish(mat_msg)
+        self.get_logger().info(f'识别到 {target_count} 个物体，矩阵大小 {target_count}x3')
+
+        # 5. 计算 FPS 并发布标注图像
+        current_time = time.time()
+        fps = 1.0 / (current_time - self.prev_time) if (current_time - self.prev_time) > 0 else 0.0
+        self.prev_time = current_time
+        cv2.putText(annotated, f'FPS: {int(fps)} Count: {target_count}', (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        ros_image = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+        self.image_pub.publish(ros_image)
+
+        # 6. 本地预览窗口（调试用，不需要时删除这两行）
+        cv2.imshow('YOLO HikRobot Detection', annotated)
+        cv2.waitKey(1)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = YoloHikCamNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('检测到 Ctrl+C，正在退出...')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+```
+
+**配置文件**（对应程序：`yolo_hik_cam_node.json`）：
+
+```json
+{
+    "model_path": "weights/best.pt",
+    "camera_topic": "/raw/image"
+}
+```
+
+> 说明：`camera_topic` 就是海康相机驱动节点发布的图像话题名 `/raw/image`。如果你用的是其它相机，把它改成对应话题即可，代码无需改动。
+
+**节点发布的话题汇总**：
+
+| 方向 | 话题名 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| 订阅 | `/raw/image` | `sensor_msgs/Image` | 海康相机原始图像（来自驱动节点） |
+| 发布 | `yolo_detection/image_annotated` | `sensor_msgs/Image` | 画好检测框的图像（Rviz2 可视化用） |
+| 发布 | `yolo_detection/results_matrix` | `std_msgs/Float32MultiArray` | 检测结果矩阵 `n×3`（cls, dx, dy） |
+
+---
+
+# 第四部分：海康相机 ROS2 节点
+
+> 海康工业相机（Hikvision）不能像 USB 摄像头那样用 `cv2.VideoCapture` 直接打开，需要由专门的 ROS2 驱动节点采集并发布图像。参考仓库的 `hikvision-camera` 分支提供了这个驱动。下面介绍它的**节点名称、话题**和用法。
+
+## 4.1 节点与话题一览（重要）
+
+参考仓库 `hikvision-camera` 分支 `src/hikvision_ros2_driver.cpp` 中，驱动节点的关键信息如下：
+
+| 项目 | 值 |
+| --- | --- |
+| 包名（package） | `hikvision_ros2_driver` |
+| 节点名（node name） | **`hikvision_ros2_driver_node`** |
+| 可执行文件名（executable） | `hikvision_ros2_driver_node` |
+| 图像话题（发布） | **`/raw/image`**（类型 `sensor_msgs/Image`） |
+| 信息话题（发布） | `/info`（类型 `hikvision_interface/msg/HikImageInfo`） |
+| 启动文件 | `hikvision_camera.launch.py` |
+
+> **节点名称就是 `hikvision_ros2_driver_node`**，它在代码里通过 `rclcpp::Node("hikvision_ros2_driver_node", ...)` 声明；图像发布用 `image_transport::create_publisher(this, "raw/image", ...)`，所以原始图像话题是 `/raw/image`。YOLO 节点（第三部分 3.5）订阅的正是这个 `/raw/image`。
+
+## 4.2 依赖说明
+
+该驱动是 **C++ 包**，编译它需要：
+
+- **MVS SDK**（海康工业相机官方 SDK，需从海康官网下载并配置 `cmake/FindMVS.cmake` 找到它）
+- **`hikvision_interface`** 包（自定义消息，定义了 `HikImageInfo`，参考仓库相关接口包）
+- ROS2 依赖：`rclcpp`、`rclcpp_components`、`sensor_msgs`、`image_transport`、`image_transport_plugins`
+
+## 4.3 启动文件（关键参数）
+
+参考仓库 `launch/hikvision_camera.launch.py` 里配置了相机名和图像参数：
+
+```python
+camera_driver = Node(
+    package="hikvision_ros2_driver",
+    executable="hikvision_ros2_driver_node",   # 节点可执行文件（= 节点名）
+    parameters=[{
+        'camera_name': "CS016",      # 海康相机在 SDK 里的用户自定义名（要改成你实际设置的名字）
+        'nWidth': 1280,              # 图像宽度（步进 16）
+        'nHeight': 960,              # 图像高度（步进 2）
+        'nOffsetX': 0,               # 水平偏移
+        'nOffsetY': 0,               # 垂直偏移
+        'bReverseX': False,          # 水平镜像
+        'bReverseY': False,          # 垂直镜像
+        'fExposureTime': 15000.0,    # 曝光时间（微秒）
+        'fGain': 23.9812             # 增益
+    }],
+    output="screen"
+)
+```
+
+> **关键参数 `camera_name`**：驱动节点会枚举所有海康相机，找到用户自定义名（`UserDefinedName`）等于 `camera_name` 的那台才打开。请把它改成你相机在 MVS 客户端里设置的名字（驱动代码里默认值是 `MV120`，示例启动文件里是 `CS016`）。
+
+## 4.4 编译与运行
+
+```bash
+# 1. 把 hikvision-camera 分支的包放进工作空间 src 目录
+cd ~/ros2_ws/src
+git clone -b hikvision-camera https://github.com/gracilaria-none/robocon26-sues.git hikvision_ros2_driver
+
+# 2. 编译（确保已安装 MVS SDK，且 FindMVS.cmake 能找到它）
+cd ~/ros2_ws
+colcon build --packages-select hikvision_ros2_driver
+source install/setup.bash
+
+# 3. 启动相机驱动节点
+ros2 launch hikvision_ros2_driver hikvision_camera.launch.py
+```
+
+启动后，用下面的命令验证图像确实在发：
+
+```bash
+# 查看当前所有话题，应能看到 /raw/image 和 /info
+ros2 topic list
+
+# 查看 /raw/image 是否在持续更新（应看到不断刷新的数据）
+ros2 topic hz /raw/image
+```
+
+## 4.5 端到端联调（海康相机 + YOLO）
+
+把相机驱动节点和 YOLO 节点都跑起来，即可完成「海康相机取图 → YOLO 检测 → 发布结果」的完整链路：
+
+```bash
+# 终端 1：启动海康相机驱动
+ros2 launch hikvision_ros2_driver hikvision_camera.launch.py
+
+# 终端 2：启动海康版 YOLO 检测节点（先确认 yolo_hik_cam_node.json 里 model_path、camera_topic 正确）
+ros2 run yolo_detector yolo_hik_detection_node
+
+# 终端 3（可选）：用 RViz2 可视化画好框的图像
+ros2 run rviz2 rviz2
+#   在 RViz2 里 Add -> By topic -> /yolo_detection/image_annotated -> Image
+```
+
+> 如果只用了普通 USB 相机，则把相机图像发到 `/camera/image_raw`，运行通用节点 `ros2 run yolo_detector yolo_node --ros-args -p model_path:=...` 即可，逻辑完全一致。
+
+---
+
+# 第五部分：GitHub 仓库位置
+
+## 参考仓库地址
+
+- **仓库链接**：`https://github.com/gracilaria-none/robocon26-sues.git`
+- **克隆命令**：
+
+```bash
+git clone https://github.com/gracilaria-none/robocon26-sues.git
+```
+
+## 分支说明
+
+该仓库按功能拆成三个分支：
+
+| 分支 | 内容 | 本教程对应章节 |
+| --- | --- | --- |
+| `data` | 配置文件 `yolo_hik_cam_node.json`（模型路径 + 相机话题） | 第三部分 3.5 |
+| `hikvision-camera` | 海康相机 ROS2 驱动（C++，节点名 `hikvision_ros2_driver_node`） | 第四部分 |
+| `weapon-yolo` | YOLO 检测包（`yolo_detector`）+ 权重 `weights/best.pt` | 第三部分 3.3~3.5 |
+
+## 仓库目录说明（`weapon-yolo` 分支）
+
+```
+weapon-yolo/
+├── package.xml                 # 包描述（ament_python）
+├── setup.py                    # 安装与入口点（console_scripts）
+├── setup.cfg
+├── resource/
+│   └── yolo_detector
+├── weights/
+│   └── best.pt                 # 训练好的 YOLO 权重（推理用，无需再训练）
+└── yolo_detector/
+    ├── __init__.py
+    ├── yolo_node.py            # 通用 YOLO 节点（订阅 /camera/image_raw）
+    └── yolo_hik_cam_node.py    # 海康相机 YOLO 节点（订阅 /raw/image）
+```
+
+`setup.py` 里注册的两个可执行入口（对应 `ros2 run` 的命令）：
+
+```python
+entry_points={
+    'console_scripts': [
+        'yolo_node = yolo_detector.yolo_node:main',
+        'yolo_hik_detection_node = yolo_detector.yolo_hik_cam_node:main',
+    ],
+},
+```
+
+---
+
+# 第六部分：常见问题（FAQ）
+
+**Q1：`ros2` 命令找不到？**
+A：没有 source 环境。执行 `source /opt/ros/humble/setup.bash`，或确认已写入 `~/.bashrc`。
+
+**Q2：`import cv2` 报错 `No module named 'cv2'`？**
+A：没装或装错了环境。执行 `pip3 install opencv-python`，并确认用的是同一个 Python 解释器。
+
+**Q3：`import cv_bridge` 报错？**
+A：没装 ROS2 的 cv_bridge。执行 `sudo apt install ros-humble-cv-bridge -y`。
+
+**Q4：运行 YOLO 节点时报 `No module named 'ultralytics'`？**
+A：执行 `pip3 install ultralytics`。注意 ROS2 节点用的是系统 Python3，确保装到了同一个环境。
+
+**Q5：`ros2 run yolo_detector yolo_node` 提示找不到包？**
+A：包没编译/没 source。回到 `~/ros2_ws` 执行 `colcon build` 和 `source install/setup.bash`。
+
+**Q6：通用 YOLO 节点报 `缺少必需的 model_path 参数`？**
+A：启动时没传权重路径。加参数：`--ros-args -p model_path:=/绝对路径/best.pt`。
+
+**Q7：海康 YOLO 节点一直收不到图像？**
+A：先确认相机驱动节点在跑（`ros2 node list` 应能看到 `hikvision_ros2_driver_node`），再确认 `/raw/image` 在发数据（`ros2 topic hz /raw/image`）。如果都没问题，检查 `yolo_hik_cam_node.json` 里的 `camera_topic` 是否为 `/raw/image`。
+
+**Q8：海康相机驱动编译失败 / 找不到 MVS SDK？**
+A：驱动是 C++ 包，依赖海康 MVS SDK，需要先安装并让 `cmake/FindMVS.cmake` 找到它；同时需要 `hikvision_interface` 消息包。
+
+**Q9：`/raw/image` 有数据，但检测画面是黑的或没框？**
+A：海康相机输出的可能是 Bayer 原始格式（BAYER_RGGB8 等），OpenCV 需要先做去马赛克。检查相机输出像素格式；或在驱动端设为 RGB8/BGR8 输出。若图像偏色，注意 OpenCV 是 BGR 顺序。
+
+**Q10：模型加载很慢 / 显存不足？**
+A：推理阶段可在加载时用小模型（如 `yolov8n.pt`），或降低输入尺寸。实时性要求高时可用 TensorRT 加速（进阶内容）。
+
+---
+
+> 本文档由 **gracilaria** 编写，参考仓库 [robocon26-sues](https://github.com/gracilaria-none/robocon26-sues.git)。祝你顺利跑通基于 ROS2 的海康相机 YOLO 检测！🚀
