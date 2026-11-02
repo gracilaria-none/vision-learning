@@ -1,0 +1,12 @@
+# data.yaml —— 数据集配置文件
+# 训练集图片路径（改成你自己的实际路径）
+train: ./dataset/train/images
+# 验证集图片路径
+val: ./dataset/val/images
+
+# nc = number of classes，即类别总数，下面有 3 个类别
+nc: 3
+
+# names：类别名称列表，顺序要和标注时一致
+# 这里是「红色方块 / 蓝色方块 / 障碍物」的例子
+names: ['red_block', 'blue_block', 'obstacle']
